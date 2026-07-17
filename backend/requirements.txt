@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+opencv-python
+numpy
+requests
+deepface
+scikit-learn
+tf-keras
