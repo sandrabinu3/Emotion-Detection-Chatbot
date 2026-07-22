@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 
-const WS_URL = 'ws://localhost:8000/ws'
-const CAPTURE_INTERVAL_MS = 700
+const WS_URL = "wss://abcd1234.trycloudflare.com/ws"
+const CAPTURE_INTERVAL_MS = 3000
 
 export default function App() {
   const videoRef = useRef(null)
@@ -33,7 +33,20 @@ export default function App() {
     wsRef.current = ws
 
     ws.onopen = () => setConnected(true)
-    ws.onclose = () => setConnected(false)
+    ws.onclose = (event) => {
+      console.log(
+        "WS CLOSED",
+        event.code,
+        event.reason,
+        event.wasClean
+      )
+
+      setConnected(false)
+    }
+    ws.onerror = (e) => {
+      console.log("WS ERROR", e)
+    }
+    
 
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data)
@@ -93,9 +106,15 @@ export default function App() {
   }, [messages])
 
   function sendMessage() {
+    console.log("SEND CLICKED");
     const ws = wsRef.current
     const text = draft.trim()
-    if (!text || !ws || ws.readyState !== WebSocket.OPEN) return
+    console.log("Draft:", text);
+    console.log("WS State:", ws?.readyState);
+    console.log("Sending chat:", text)
+    if (!text || !ws || ws.readyState !== WebSocket.OPEN) {
+      console.log("Cannot send", ws?.readyState) 
+      return}
 
     setMessages((prev) => [...prev, { from: 'user', text, ts: Date.now() }])
     ws.send(JSON.stringify({ message: text }))

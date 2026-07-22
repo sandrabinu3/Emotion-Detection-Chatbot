@@ -3,6 +3,7 @@ import time
 import base64
 import asyncio
 import concurrent.futures
+from tracemalloc import start
 
 import cv2
 import numpy as np
@@ -14,6 +15,8 @@ from deepface import DeepFace
 from sklearn.metrics.pairwise import cosine_similarity
 from hsemotion.facial_emotions import HSEmotionRecognizer
 import torch
+import traceback
+
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -55,9 +58,10 @@ emotion_recognizer = HSEmotionRecognizer(model_name="enet_b0_8_best_afew", devic
 
 SYSTEM_PROMPT = (
     """You are a warm, friendly chat companion having a live conversation. 
-    Keep replies short and natural, like real chat messages. You can sometimes see who you're 
+    Keep replies concise and natural. You can sometimes see who you're 
     talking to and what emotion their face is currently showing; use that 
-    naturally when it's relevant, but don't mention it every message. Continue the conversation in a friendly, empathetic way, and ask questions to keep it going unless a new person comes into view. Avoid repeating yourself or asking the same questions over and over."""
+    naturally when it's relevant, but don't mention it every message. When responding, always continue the existing discussion. Continue the conversation in a friendly, empathetic way, and ask questions to keep it going unless a new person comes into view. Avoid repeating yourself or asking the same questions over and over.
+    When emotion information is available, use it as background context. Always end with a relevant question unless the user has asked for a factual answer."""
 )
 
 
@@ -83,13 +87,15 @@ def ask_ollama_chat(history):
                 "model": "llama3.2",
                 "messages": history,
                 "stream": False,
-                "options": {"num_predict": 60},
+                "options": {"num_predict": 2000}
             },
-            timeout=20,
+            timeout=40,
         )
         response.raise_for_status()
         payload = response.json()
+        print(response.json())
         content = payload.get("message", {}).get("content", "")
+
         return content.strip() or build_fallback_reply(history)
     except Exception as e:
         print("Ollama chat error:", repr(e))
@@ -203,11 +209,15 @@ def recognize_face(padded_face) -> str:
 
 def analyze_emotion(padded_face) -> str:
     try:
+        print("Emotion prediction starting")
         rgb_face = cv2.cvtColor(padded_face, cv2.COLOR_BGR2RGB)
         emotion, _scores = emotion_recognizer.predict_emotions(rgb_face, logits=True)
         return emotion.lower()
-    except Exception:
+    except Exception as e:
+        print("Emotion error:", repr(e))
+        traceback.print_exc()
         return ""
+
 
 
 def process_frame(frame):
@@ -241,8 +251,10 @@ def process_frame(frame):
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    print("WebSocket connect requested")
 
     await websocket.accept()
+    print("WebSocket accepted")
 
     loop = asyncio.get_event_loop()
 
@@ -250,65 +262,128 @@ async def websocket_endpoint(websocket: WebSocket):
     # like a real chatbot instead of disconnected one-off generations.
     history = [{"role": "system", "content": SYSTEM_PROMPT}]
 
+    current_person = None
+    current_emotion = None
+
+    face_history = []
+    emotion_history = []
+
+    WINDOW_SIZE = 30
+
     last_name = ""
     last_emotion = ""
     last_chat_time = 0.0
-    chat_delay = 5
+    chat_delay = 30
+    emotion_history =[]
 
     try:
         while True:
-
+            print("Waiting for client message...")
             payload = await websocket.receive_json()
-
+            # print("FULL PAYLOAD:", payload)
             try:
                 # ---- typed chat message ----
                 if "message" in payload:
-
+                    print("User message received")
                     user_text = payload["message"].strip()
+                    print("User text:", user_text)
+
                     if not user_text:
                         continue
 
                     history.append({"role": "user", "content": user_text})
                     history = trim_history(history)
-
+                    print("User:", user_text)
+                    print("Sending to Ollama")
                     reply = await loop.run_in_executor(chat_executor, ask_ollama_chat, history)
-                    history.append({"role": "assistant", "content": reply})
+                    print("Ollama reply:", reply)
+                    history.append({
+                        "role": "assistant",
+                        "content": reply
+                    })
 
-                    await websocket.send_json({"kind": "chat", "reply": reply})
-                    history.append({"role": "assistant", "content": reply})
                     history = trim_history(history)
-                    continue
+
+                    current_person = stable_name
+                    current_emotion = stable_emotion
+
+                    last_chat_time = time.time()
+                    await websocket.send_json({
+                        "kind": "vision",
+                        "box": result["box"],
+                        "name": stable_name,
+                        "emotion": stable_emotion,
+                        "reply": reply,
+                    })
 
                 # ---- webcam frame tick ----
                 if "frame" in payload:
-
+                    
                     frame = decode_frame(payload["frame"])
+                    start = time.time()
                     result = await loop.run_in_executor(vision_executor, process_frame, frame)
-
+                    print("Frame processing:", time.time() - start)
                     name = result["name"]
                     emotion = result["emotion"]
 
+                    if name != "Unknown":
+                        face_history.append(name)
+
+                    if emotion:
+                        emotion_history.append(emotion)
+
+                    face_history = face_history[-WINDOW_SIZE:]
+                    emotion_history = emotion_history[-WINDOW_SIZE:]
+
+                    stable_name = (
+                        max(set(face_history), key=face_history.count)
+                        if face_history else "Unknown"
+                    )
+
+                    stable_emotion = (
+                        max(set(emotion_history), key=emotion_history.count)
+                        if emotion_history else ""
+                    )
+                    person_changed = (
+                        current_person is not None
+                        and stable_name != current_person
+                    )
+
+                    state_changed = (
+                        stable_name != current_person
+                        or stable_emotion != current_emotion
+                    )
+                    if person_changed:
+                        history = [
+                            {"role": "system", "content": SYSTEM_PROMPT}
+                        ]
                     reply = None
-                    changed = (name != last_name or emotion != last_emotion)
 
-                    if result["box"] is not None and changed and (time.time() - last_chat_time > chat_delay):
-
-                        # Feed the vision update into the SAME conversation history,
-                        # as a lightweight context note, so the model can react to
-                        # it naturally and stays consistent with anything already
-                        # discussed in the chat.
-                        context_note = f"(I can now see: {name}, looking {emotion})"
-                        history.append({"role": "user", "content": context_note})
+                    if (
+                        result["box"] is not None
+                        and state_changed
+                        and (time.time() - last_chat_time > chat_delay)
+                    ):
+                        last_chat_time = time.time()
+                        current_person = stable_name
+                        current_emotion = stable_emotion
+                        if current_person != "Unknown":
+                            history.append(
+                                {
+                                    "role": "system",
+                                    "content": f"The person in view is {current_person} and they are showing {current_emotion} emotion.",
+                                }
+                            )
+                        else:
+                            history.append(
+                                {
+                                    "role": "system",
+                                    "content": f"The person in view is unknown and they are showing {current_emotion} emotion.",
+                                }
+                            )
                         history = trim_history(history)
-
                         reply = await loop.run_in_executor(chat_executor, ask_ollama_chat, history)
                         history.append({"role": "assistant", "content": reply})
-                        history.append({"role": "assistant", "content": reply})
-                        history = trim_history(history)
-                        last_name = name
-                        last_emotion = emotion
-                        last_chat_time = time.time()
-
                     await websocket.send_json({
                         "kind": "vision",
                         "box": result["box"],
@@ -318,15 +393,17 @@ async def websocket_endpoint(websocket: WebSocket):
                     })
 
             except WebSocketDisconnect:
-                raise
+                print("Client disconnected")
+                break
             except Exception as e:
                 # A single bad frame or a hiccup from Ollama/DeepFace should never
                 # kill the whole connection — log it and keep the loop alive.
-                print("Error while handling message:", repr(e))
+                traceback.print_exc()
                 try:
                     await websocket.send_json({"kind": "error", "message": str(e)})
                 except Exception:
                     pass
 
-    except WebSocketDisconnect:
-        print("Client disconnected")
+    except WebSocketDisconnect as e:
+
+        print("Client disconnected:", e)
