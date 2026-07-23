@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 
-const WS_URL = "wss://abcd1234.trycloudflare.com/ws"
+const WS_URL = "https://mighty-lions-turn.loca.lt"
 const CAPTURE_INTERVAL_MS = 3000
 
 export default function App() {
