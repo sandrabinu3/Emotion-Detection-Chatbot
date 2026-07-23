@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 
-const WS_URL = "https://mighty-lions-turn.loca.lt"
+// const WS_URL = "ws://localhost:8000/ws"
+// const WS_URL = "https://mighty-lions-turn.loca.lt"
+const WS_URL = "wss://qtm1r5qp-8000.uks1.devtunnels.ms/ws"
 const CAPTURE_INTERVAL_MS = 3000
 
 export default function App() {
