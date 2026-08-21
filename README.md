@@ -16,6 +16,44 @@ recognizes you and reads your emotion.
   Ollama for a reply when your name or emotion changes. Sends the result
   back as JSON.
 
+## Code flow
+
+```mermaid
+flowchart LR
+
+    A[Start App] --> B[Load Models and known faces]
+    B --> C[Wait for the client input]
+
+    C --> D{Input type}
+
+    %% Chat message path
+    D -->|Chat Message| E[Update Conversation History]
+    E --> F[Reply generated and send to frontend]
+    
+
+    %% Camera frame path
+    D -->|Camera Frame| G[Decode frame]
+    G --> H{Detect face}
+
+    H -->|Yes| I[Identify Person]
+    H -->|No| J[Set User = Unknown]
+
+    I --> K[Detect Emotion and Update Face history]
+    J --> K
+
+    K --> L{Person / Emotion Changed}
+
+    L -->|Yes| M[Generate Context-aware reply]
+    M --> N[Send Recognition Result]
+    N --> O[Update UI Name, Emotion and Chat]
+
+    L -->|No| P[Skip reply generation]
+    P --> O
+
+    O --> C
+    F --> C
+```
+
 ## Setup
 
 ### Backend

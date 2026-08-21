@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 // const WS_URL = "ws://localhost:8000/ws"
 // const WS_URL = "https://mighty-lions-turn.loca.lt"
 const WS_URL = "wss://qtm1r5qp-8000.uks1.devtunnels.ms/ws"
+
 const CAPTURE_INTERVAL_MS = 3000
 
 export default function App() {
@@ -12,7 +13,7 @@ export default function App() {
   const wsRef = useRef(null)
   const messagesEndRef = useRef(null)
 
-  const [connected, setConnected] = useState(false)
+  const [connected, setConnected] = useState(false) 
   const [name, setName] = useState('Unknown')
   const [emotion, setEmotion] = useState('')
   const [messages, setMessages] = useState([])

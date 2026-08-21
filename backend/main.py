@@ -262,7 +262,7 @@ async def websocket_endpoint(websocket: WebSocket):
     # like a real chatbot instead of disconnected one-off generations.
     history = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    current_person = None
+    current_person = "Unknown"
     current_emotion = None
 
     face_history = []
@@ -270,8 +270,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
     WINDOW_SIZE = 30
 
-    last_name = ""
-    last_emotion = ""
     last_chat_time = 0.0
     chat_delay = 30
     emotion_history =[]
