@@ -11,3 +11,4 @@ wheels/
 
 frontend/dist 
 frontend/node_modules
+*.pptx
