@@ -256,7 +256,11 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     print("WebSocket accepted")
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
+    send_lock = asyncio.Lock()
+    state_lock = asyncio.Lock()
+    vision_task = None
+    background_tasks = set()
 
     # Conversation memory for this connection — this is what makes it feel
     # like a real chatbot instead of disconnected one-off generations.
@@ -274,131 +278,111 @@ async def websocket_endpoint(websocket: WebSocket):
     chat_delay = 30
     emotion_history =[]
 
+    async def send_json(payload):
+        async with send_lock:
+            await websocket.send_json(payload)
+
+    def report_task_result(task):
+        background_tasks.discard(task)
+        if not task.cancelled() and task.exception():
+            traceback.print_exception(task.exception())
+
+    async def handle_chat(user_text):
+        nonlocal history
+        print("User message received")
+        print("User text:", user_text)
+
+        async with state_lock:
+            history.append({"role": "user", "content": user_text})
+            history = trim_history(history)
+            request_history = list(history)
+
+        print("Sending to Ollama")
+        reply = await loop.run_in_executor(chat_executor, ask_ollama_chat, request_history)
+        print("Ollama reply:", reply)
+
+        async with state_lock:
+            history.append({"role": "assistant", "content": reply})
+            history = trim_history(history)
+            response_name = current_person
+            response_emotion = current_emotion or ""
+
+        await send_json({
+            "kind": "chat",
+            "name": response_name,
+            "emotion": response_emotion,
+            "reply": reply,
+        })
+
+    async def handle_frame(frame):
+        nonlocal current_person, current_emotion, history, last_chat_time
+        start = time.time()
+        result = await loop.run_in_executor(vision_executor, process_frame, frame)
+        print("Frame processing:", time.time() - start)
+        name = result["name"]
+        emotion = result["emotion"]
+
+        async with state_lock:
+            if name != "Unknown":
+                face_history.append(name)
+            if emotion:
+                emotion_history.append(emotion)
+            del face_history[:-WINDOW_SIZE]
+            del emotion_history[:-WINDOW_SIZE]
+
+            stable_name = max(set(face_history), key=face_history.count) if face_history else "Unknown"
+            stable_emotion = max(set(emotion_history), key=emotion_history.count) if emotion_history else ""
+            state_changed = stable_name != current_person or stable_emotion != current_emotion
+            reply = None
+
+            if result["box"] is not None and state_changed and time.time() - last_chat_time > chat_delay:
+                last_chat_time = time.time()
+                current_person = stable_name
+                current_emotion = stable_emotion
+                history.append({
+                    "role": "system",
+                    "content": f"The person in view is {stable_name} and they are showing {stable_emotion} emotion.",
+                })
+                history = trim_history(history)
+                request_history = list(history)
+            else:
+                request_history = None
+
+        if request_history is not None:
+            reply = await loop.run_in_executor(chat_executor, ask_ollama_chat, request_history)
+            async with state_lock:
+                history.append({"role": "assistant", "content": reply})
+                history = trim_history(history)
+
+        await send_json({
+            "kind": "vision",
+            "box": result["box"],
+            "name": name,
+            "emotion": emotion,
+            "reply": reply,
+        })
+
     try:
         while True:
-            print("Waiting for client message...")
             payload = await websocket.receive_json()
-            # print("FULL PAYLOAD:", payload)
             try:
-                # ---- typed chat message ----
                 if "message" in payload:
-                    print("User message received")
-                    user_text = payload["message"].strip()
-                    print("User text:", user_text)
+                    user_text = str(payload["message"]).strip()
+                    if user_text:
+                        task = asyncio.create_task(handle_chat(user_text))
+                        background_tasks.add(task)
+                        task.add_done_callback(report_task_result)
 
-                    if not user_text:
-                        continue
-
-                    history.append({"role": "user", "content": user_text})
-                    history = trim_history(history)
-                    print("User:", user_text)
-                    print("Sending to Ollama")
-                    reply = await loop.run_in_executor(chat_executor, ask_ollama_chat, history)
-                    print("Ollama reply:", reply)
-                    history.append({
-                        "role": "assistant",
-                        "content": reply
-                    })
-
-                    history = trim_history(history)
-
-                    current_person = stable_name
-                    current_emotion = stable_emotion
-
-                    last_chat_time = time.time()
-                    await websocket.send_json({
-                        "kind": "vision",
-                        "box": result["box"],
-                        "name": stable_name,
-                        "emotion": stable_emotion,
-                        "reply": reply,
-                    })
-
-                # ---- webcam frame tick ----
-                if "frame" in payload:
-                    
+                if "frame" in payload and (vision_task is None or vision_task.done()):
                     frame = decode_frame(payload["frame"])
-                    start = time.time()
-                    result = await loop.run_in_executor(vision_executor, process_frame, frame)
-                    print("Frame processing:", time.time() - start)
-                    name = result["name"]
-                    emotion = result["emotion"]
+                    vision_task = asyncio.create_task(handle_frame(frame))
+                    background_tasks.add(vision_task)
+                    vision_task.add_done_callback(report_task_result)
 
-                    if name != "Unknown":
-                        face_history.append(name)
-
-                    if emotion:
-                        emotion_history.append(emotion)
-
-                    face_history = face_history[-WINDOW_SIZE:]
-                    emotion_history = emotion_history[-WINDOW_SIZE:]
-
-                    stable_name = (
-                        max(set(face_history), key=face_history.count)
-                        if face_history else "Unknown"
-                    )
-
-                    stable_emotion = (
-                        max(set(emotion_history), key=emotion_history.count)
-                        if emotion_history else ""
-                    )
-                    person_changed = (
-                        current_person is not None
-                        and stable_name != current_person
-                    )
-
-                    state_changed = (
-                        stable_name != current_person
-                        or stable_emotion != current_emotion
-                    )
-                    if person_changed:
-                        history = [
-                            {"role": "system", "content": SYSTEM_PROMPT}
-                        ]
-                    reply = None
-
-                    if (
-                        result["box"] is not None
-                        and state_changed
-                        and (time.time() - last_chat_time > chat_delay)
-                    ):
-                        last_chat_time = time.time()
-                        current_person = stable_name
-                        current_emotion = stable_emotion
-                        if current_person != "Unknown":
-                            history.append(
-                                {
-                                    "role": "system",
-                                    "content": f"The person in view is {current_person} and they are showing {current_emotion} emotion.",
-                                }
-                            )
-                        else:
-                            history.append(
-                                {
-                                    "role": "system",
-                                    "content": f"The person in view is unknown and they are showing {current_emotion} emotion.",
-                                }
-                            )
-                        history = trim_history(history)
-                        reply = await loop.run_in_executor(chat_executor, ask_ollama_chat, history)
-                        history.append({"role": "assistant", "content": reply})
-                    await websocket.send_json({
-                        "kind": "vision",
-                        "box": result["box"],
-                        "name": name,
-                        "emotion": emotion,
-                        "reply": reply,
-                    })
-
-            except WebSocketDisconnect:
-                print("Client disconnected")
-                break
             except Exception as e:
-                # A single bad frame or a hiccup from Ollama/DeepFace should never
-                # kill the whole connection — log it and keep the loop alive.
                 traceback.print_exc()
                 try:
-                    await websocket.send_json({"kind": "error", "message": str(e)})
+                    await send_json({"kind": "error", "message": str(e)})
                 except Exception:
                     pass
 
