@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import base64
 import asyncio
@@ -61,7 +62,7 @@ SYSTEM_PROMPT = (
     Keep replies concise and natural. You can sometimes see who you're 
     talking to and what emotion their face is currently showing; use that 
     naturally when it's relevant, but don't mention it every message. When responding, always continue the existing discussion. Continue the conversation in a friendly, empathetic way, and ask questions to keep it going unless a new person comes into view. Avoid repeating yourself or asking the same questions over and over.
-    When emotion information is available, use it as background context. Always end with a relevant question unless the user has asked for a factual answer."""
+    When emotion information is available, use it as background context. Always end with a relevant question unless the user has asked for a factual answer. Never prefix your reply with a role label such as 'assistant:'."""
 )
 
 
@@ -75,6 +76,11 @@ def build_fallback_reply(history):
     if any(word in last_user.lower() for word in ["sad", "hurt", "alone", "depressed", "upset", "anxious", "stressed", "worried"]):
         return "I’m here with you. Want to tell me what’s been weighing on you?"
     return "I’m here and listening. Tell me what’s on your mind."
+
+
+def clean_model_reply(content):
+    """Remove a role label when the model includes one in its text."""
+    return re.sub(r"^(?:\s*assistant\s*:?\s*)+", "", content, flags=re.IGNORECASE).strip()
 
 
 def ask_ollama_chat(history):
@@ -94,7 +100,7 @@ def ask_ollama_chat(history):
         response.raise_for_status()
         payload = response.json()
         print(response.json())
-        content = payload.get("message", {}).get("content", "")
+        content = clean_model_reply(payload.get("message", {}).get("content", ""))
 
         return content.strip() or build_fallback_reply(history)
     except Exception as e:
